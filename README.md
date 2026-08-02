@@ -12,10 +12,6 @@ It logs in with your member credentials, saves raw JSON responses, and writes CS
 - per-exercise workout rows
 - per-set EGYM machine workout rows
 
-## Why chunked workout fetches matter
-
-The workout-history endpoint can silently truncate very wide date-range requests. This exporter fetches workouts in date chunks and merges them, which makes older history available when the app can display it.
-
 ## Requirements
 
 - Python 3.10+
