@@ -1,0 +1,19 @@
+# Ignore everything in this mixed-use workspace by default.
+*
+
+# Publishable FFExport project files.
+!.gitignore
+!README.md
+!FFExport.py
+
+# Python cache.
+__pycache__/
+*.pyc
+
+# Local export data and scratch outputs.
+FFExport/
+fitness_first_export/
+tmp_ff_*/
+
+# macOS metadata.
+.DS_Store
