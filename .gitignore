@@ -5,6 +5,7 @@
 !.gitignore
 !README.md
 !FFExport.py
+!EvoltExport.py
 
 # Python cache.
 __pycache__/
@@ -12,6 +13,9 @@ __pycache__/
 
 # Local export data and scratch outputs.
 FFExport/
+EvoltExport/
+EvoltExport-test/
+EvoltExport*/
 fitness_first_export/
 tmp_ff_*/
 

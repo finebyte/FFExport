@@ -1,8 +1,13 @@
 # FFExport
 
-Read-only exporter for member data exposed by the Fitness First UK app's Netpulse / EGYM backend.
+Read-only exporters for member data exposed by the Fitness First UK app and linked services.
 
-It logs in with your member credentials, saves raw JSON responses, and writes CSV summaries for:
+This repo currently includes:
+
+- `FFExport.py` for the Fitness First UK app's Netpulse / EGYM backend
+- `EvoltExport.py` for linked Evolt Active body-composition data
+
+`FFExport.py` logs in with your member credentials, saves raw JSON responses, and writes CSV summaries for:
 
 - gym check-ins
 - daily attendance
@@ -41,6 +46,8 @@ If the login response does not expose the member UUID automatically:
 python3 FFExport.py --user-uuid "<your-member-uuid>"
 ```
 
+The workout-history endpoint can silently truncate very wide date-range requests. `FFExport.py` fetches workouts in date chunks and merges them, which makes older history available when the app can display it.
+
 ## Main outputs
 
 - `login.json`: raw login response, including the member UUID when present
@@ -54,9 +61,65 @@ python3 FFExport.py --user-uuid "<your-member-uuid>"
 - `workout_exercises.csv`: one row per exercise within a workout
 - `machine_workout_sets.csv`: one row per EGYM machine set with reps, weight, duration, and recovery when available
 
+## Evolt export
+
+`EvoltExport.py` exports the body-composition data available through the linked Evolt Active account, including scan history and scan assets.
+
+If your Fitness First UK account is linked to Evolt, you generally use the same email address for both systems, but you still need Evolt-specific credentials. In practice that means:
+
+- log into the Evolt app or website separately
+- use the same email address as your Fitness First UK account
+- use your Evolt password, not your Fitness First UK password unless you have explicitly set them to match
+
+The exporter talks to the Evolt Active web backend directly and currently pulls the data exposed by the member-facing web app, including:
+
+- member profile metadata
+- scan history
+- scan notes
+- macro-calculation responses
+- supplementary questionnaire/reference endpoints
+- scan PDFs or manual scan images when available
+
+The most useful file for day-to-day analysis is usually `scans_summary.csv`, which flattens each scan into a simpler table with metrics such as scan date, body weight, lean mass, skeletal muscle mass, body fat, visceral fat, BMR, and total energy expenditure when those values are present in the API response.
+
+Usage:
+
+```bash
+export EVOLT_EMAIL="you@example.com"
+export EVOLT_PASSWORD="your-password"
+python3 EvoltExport.py
+```
+
+Useful options:
+
+```bash
+python3 EvoltExport.py --output-dir my_EvoltExport
+python3 EvoltExport.py --skip-assets
+python3 EvoltExport.py --base-url https://webservice.evoltactive.com
+```
+
+If you only want the tabular data and do not care about attached PDFs/images, use `--skip-assets` to keep the export smaller and faster.
+
+Main outputs:
+
+- `login.json`: login response with tokens redacted before saving
+- `summary.json`: resolved base URL, email, member ID, and scan count
+- `member.json`: profile and account metadata
+- `scans.json` / `scans.csv`: raw and flattened scan history
+- `scans_summary.csv`: scan-focused summary with body weight, lean mass, body fat, BMR, and related metrics when exposed
+- `scannotes.json` / `scannotes.csv`: scan notes where available
+- `macronutrientcalculations.json`: macro-calculation response when available
+- `scan_assets/`: downloaded scan PDFs or manual-scan images unless `--skip-assets` is used
+
+Additional informational endpoints such as FAQs, countries, supplement questions, and health-lifestyle questions are also exported when the account exposes them.
+
+If some Evolt endpoints fail, the script still writes the successful responses and continues. That makes it useful both as a personal export tool and as a lightweight way to inspect what a particular account currently exposes.
+
 ## Notes
 
-- FFExport is intentionally read-only.
+- Both scripts are intentionally read-only.
 - It currently targets the Fitness First UK Netpulse host by default.
 - Connected-app workouts and machine workouts can both appear in the workout history.
 - If some endpoints fail, the successful JSON files are still useful for inspecting what your account exposes.
+- EvoltExport is also intentionally read-only and currently targets the public Evolt Active webservice host used by the app.
+- Export folders such as `FFExport/` and `EvoltExport/` are git-ignored so local data and tokens do not get committed by accident.
