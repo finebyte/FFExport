@@ -6,6 +6,8 @@
 !README.md
 !FFExport.py
 !EvoltExport.py
+!GoogleHealthExport.py
+!export_storage.py
 
 # Python cache.
 __pycache__/
@@ -14,6 +16,10 @@ __pycache__/
 # Local export data and scratch outputs.
 FFExport/
 EvoltExport/
+GoogleHealthExport/
+MyTherapyExport/
+MyTherapyExport.py
+mytherapy_tokens.json
 EvoltExport-test/
 EvoltExport*/
 fitness_first_export/

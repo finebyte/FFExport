@@ -2,11 +2,14 @@
 """Export read-only member data from the Fitness First UK Evolt Active backend."""
 
 import argparse
+import ast
 import csv
 import json
 import mimetypes
 import os
 import sys
+from datetime import datetime, timezone
+from export_storage import atomic_write_text, atomic_csv
 import uuid
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
@@ -116,6 +119,26 @@ def env_default(primary: str, legacy: str | None = None) -> str | None:
     return None
 
 
+def load_dotenv(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value and value[0] in {'"', "'"}:
+            try:
+                value = str(ast.literal_eval(value))
+            except (SyntaxError, ValueError):
+                value = value.strip("\"'")
+        os.environ.setdefault(key, value)
+
+
 def encode_multipart_formdata(fields: dict[str, str]) -> tuple[bytes, str]:
     boundary = f"----EvoltExport{uuid.uuid4().hex}"
     lines: list[bytes] = []
@@ -138,7 +161,7 @@ def ensure_output_dir(path: Path) -> None:
 
 
 def write_json(path: Path, payload: Any) -> None:
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=True))
 
 
 def redact_sensitive_payload(value: Any) -> Any:
@@ -181,11 +204,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             if key not in seen:
                 seen.add(key)
                 fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: normalize_scalar(row.get(key)) for key in fieldnames})
+    atomic_csv(path, fieldnames, ({key: normalize_scalar(row.get(key)) for key in fieldnames} for row in rows))
 
 
 def flatten_object(value: Any, prefix: str = "") -> dict[str, Any]:
@@ -315,6 +334,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    load_dotenv()
     args = parse_args()
     if not args.email or not args.password:
         print("Set EVOLT_EMAIL and EVOLT_PASSWORD, or pass --email and --password.", file=sys.stderr)
@@ -360,6 +380,8 @@ def main() -> int:
             write_csv(args.output_dir / f"{name}.csv", [flatten_object(row) for row in rows])
 
     scans_rows = guess_rows(collected_payloads.get("scans", []))
+    if not scans_rows and (args.output_dir / "scans.csv").exists():
+        failures.append("scans: no records returned although saved scans exist")
     if scans_rows:
         write_csv(args.output_dir / "scans_summary.csv", summarize_scans(scans_rows))
         if not args.skip_assets:
@@ -371,6 +393,8 @@ def main() -> int:
         "member_id": first_present(flatten_object(collected_payloads.get("member", {})), ["id"]),
         "scan_count": len(scans_rows),
         "downloaded_assets": not args.skip_assets,
+        "failures": failures,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json(args.output_dir / "summary.json", summary)
 
@@ -380,7 +404,7 @@ def main() -> int:
             print(f"  - {failure}", file=sys.stderr)
 
     print(f"Export complete in {args.output_dir}", file=sys.stderr)
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

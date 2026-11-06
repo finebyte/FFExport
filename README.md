@@ -6,6 +6,7 @@ This repo currently includes:
 
 - `FFExport.py` for the Fitness First UK app's Netpulse / EGYM backend
 - `EvoltExport.py` for linked Evolt Active body-composition data
+- `GoogleHealthExport.py` for read-only personal exports from the Google Health API
 
 `FFExport.py` logs in with your member credentials, saves raw JSON responses, and writes CSV summaries for:
 
@@ -111,6 +112,97 @@ Main outputs:
 - `macronutrientcalculations.json`: macro-calculation response when available
 - `scan_assets/`: downloaded scan PDFs or manual-scan images unless `--skip-assets` is used
 
+## Google Health export
+
+`GoogleHealthExport.py` exports your personal Google Health data through the current `health.googleapis.com` API using OAuth 2.0 and refresh tokens. It is designed for repeatable personal exports and follows the same read-only pattern as the other scripts in this repo.
+
+The script always fetches:
+
+- identity
+- profile
+- settings
+- paired devices
+
+It also exports selected data types from `users/me/dataTypes/*/dataPoints`.
+
+By default it exports:
+
+- `steps`
+- `weight`
+- `heart-rate`
+- `sleep`
+- `exercise`
+
+Supported `--data-type` values today are:
+
+- `active-energy-burned`
+- `body-fat`
+- `daily-resting-heart-rate`
+- `distance`
+- `exercise`
+- `heart-rate`
+- `sleep`
+- `steps`
+- `weight`
+
+### Google Cloud setup
+
+Before running the script, set up the Google Health API in Google Cloud:
+
+- enable the Google Health API
+- create an OAuth 2.0 client
+- add your own Google account as a test user while the OAuth app is still in Testing
+- add the Google Health scopes you need on the Data Access page
+
+For this script, the simplest setup is to register a local redirect URI and download the credentials JSON. A practical redirect URI for the script is:
+
+```text
+http://127.0.0.1:8765/callback
+```
+
+### Usage
+
+Using the downloaded credentials file:
+
+```bash
+export GOOGLE_HEALTH_CREDENTIALS_JSON="/path/to/credentials.json"
+python3 GoogleHealthExport.py
+```
+
+Or with explicit client credentials:
+
+```bash
+export GOOGLE_HEALTH_CLIENT_ID="your-client-id"
+export GOOGLE_HEALTH_CLIENT_SECRET="your-client-secret"
+python3 GoogleHealthExport.py
+```
+
+Useful options:
+
+```bash
+python3 GoogleHealthExport.py --lookback-days 90
+python3 GoogleHealthExport.py --start-date 2026-01-01 --end-date 2026-08-03
+python3 GoogleHealthExport.py --data-type steps --data-type sleep
+python3 GoogleHealthExport.py --chunk-days 90
+python3 GoogleHealthExport.py --output-dir my_GoogleHealthExport
+python3 GoogleHealthExport.py --token-path my_GoogleHealthExport/token.json
+python3 GoogleHealthExport.py --force-consent
+python3 GoogleHealthExport.py --no-browser
+```
+
+The first run opens a browser for OAuth consent, receives a refresh token, and saves it locally. Later runs refresh the access token automatically from the saved token file.
+
+Main outputs:
+
+- `identity.json`: Google Health user identity, including the Google Health user ID
+- `profile.json`: profile fields exposed by the API
+- `settings.json`: account settings such as units and timezone
+- `paired_devices.json` / `paired_devices.csv`: paired tracker and smartwatch metadata
+- `<data-type>.json`: raw export payload for each requested data type
+- `<data-type>.csv`: flattened rows for each requested data type
+- `<data-type>_meta.json`: chunk and paging metadata for each data type
+- `summary.json`: overall export window and exported data-type counts
+
 Additional informational endpoints such as FAQs, countries, supplement questions, and health-lifestyle questions are also exported when the account exposes them.
 
 If some Evolt endpoints fail, the script still writes the successful responses and continues. That makes it useful both as a personal export tool and as a lightweight way to inspect what a particular account currently exposes.
@@ -122,4 +214,5 @@ If some Evolt endpoints fail, the script still writes the successful responses a
 - Connected-app workouts and machine workouts can both appear in the workout history.
 - If some endpoints fail, the successful JSON files are still useful for inspecting what your account exposes.
 - EvoltExport is also intentionally read-only and currently targets the public Evolt Active webservice host used by the app.
-- Export folders such as `FFExport/` and `EvoltExport/` are git-ignored so local data and tokens do not get committed by accident.
+- GoogleHealthExport is also intentionally read-only and stores its token file under the export directory by default.
+- Export folders such as `FFExport/`, `EvoltExport/`, and `GoogleHealthExport/` are git-ignored so local data and tokens do not get committed by accident.

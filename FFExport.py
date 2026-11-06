@@ -2,10 +2,13 @@
 """FFExport: export read-only member data from the Fitness First UK app backend."""
 
 import argparse
+import ast
 import csv
 import json
 import os
 import sys
+from export_storage import atomic_write_text, atomic_csv
+import time as retry_time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from http.cookiejar import CookieJar
@@ -32,6 +35,18 @@ WORKOUTS_X_NP_USER_AGENT = (
     "applicationName=NetpulseFitness; "
     "applicationVersion=3.11"
 )
+EGYM_API_URL = "https://mobile-api.int.api.egym.com"
+EGYM_APP_VERSION = "3.11"
+EGYM_USER_AGENT = "NetpulseFitness/3.11 (com.netpulse.netpulsefitness; build:853; iOS 17.2.0) Alamofire/5.4.4"
+EGYM_X_NP_USER_AGENT = (
+    "clientType=MOBILE_DEVICE; "
+    "devicePlatform=IOS; "
+    "deviceUid=fitness-first-export; "
+    "applicationName=EGYM Fitness; "
+    "applicationVersion=3.11; "
+    "applicationVersionCode=853; "
+    "containerName=NetpulseFitness;"
+)
 
 
 @dataclass
@@ -55,6 +70,7 @@ class FFExportClient:
         self.user_agent = user_agent
         self.cookies = CookieJar()
         self.opener = build_opener(HTTPCookieProcessor(self.cookies))
+        self.session_cookie: str | None = None
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {
@@ -93,26 +109,57 @@ class FFExportClient:
         return ApiResponse(url=url, status=status, payload=payload)
 
     def login(self, username: str, password: str) -> ApiResponse:
-        return self._request(
-            "/np/exerciser/login",
-            method="POST",
-            data={"username": username, "password": password},
-        )
-
-    def get(self, path: str) -> ApiResponse:
-        return self._request(path)
-
-    def get_absolute(self, url: str, headers: dict[str, str]) -> ApiResponse:
-        request = Request(url, headers=headers, method="GET")
+        url = f"{self.base_url}/np/exerciser/login"
+        body = urlencode({"username": username, "password": password}).encode("utf-8")
+        headers = self._headers({"Content-Type": "application/x-www-form-urlencoded"})
+        request = Request(url, data=body, headers=headers, method="POST")
         try:
             with self.opener.open(request, timeout=30) as response:
                 raw = response.read().decode("utf-8", errors="replace")
                 status = response.status
+                set_cookie = response.headers.get("Set-Cookie")
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"GET {url} failed with HTTP {exc.code}: {raw[:500]}") from exc
+            raise RuntimeError(f"POST {url} failed with HTTP {exc.code}: {raw[:500]}") from exc
         except URLError as exc:
-            raise RuntimeError(f"GET {url} failed: {exc.reason}") from exc
+            raise RuntimeError(f"POST {url} failed: {exc.reason}") from exc
+
+        if set_cookie:
+            self.session_cookie = set_cookie.split(";")[0]
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {"raw": raw}
+        return ApiResponse(url=url, status=status, payload=payload)
+
+    def get(self, path: str) -> ApiResponse:
+        return self._request(path)
+
+    def get_egym(self, path: str) -> ApiResponse:
+        if not self.session_cookie:
+            raise RuntimeError("No session cookie available; call login() first")
+        headers = egym_headers()
+        headers["Cookie"] = self.session_cookie
+        return self.get_absolute(f"{EGYM_API_URL}{path}", headers=headers)
+
+    def get_absolute(self, url: str, headers: dict[str, str]) -> ApiResponse:
+        request = Request(url, headers=headers, method="GET")
+        for attempt in range(3):
+            try:
+                with self.opener.open(request, timeout=30) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                    status = response.status
+                break
+            except HTTPError as exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                    raise RuntimeError(f"GET {url} failed with HTTP {exc.code}: {raw[:500]}") from exc
+            except (URLError, TimeoutError) as exc:
+                if attempt == 2:
+                    raise RuntimeError("Workout API connection failed after 3 attempts") from exc
+            print(f"Retrying workout API request ({attempt + 2}/3)", file=sys.stderr)
+            retry_time.sleep(2 ** (attempt + 1))
 
         try:
             payload = json.loads(raw)
@@ -163,6 +210,26 @@ def extract_email(login_payload: Any) -> str | None:
     return str(value) if value else None
 
 
+def load_dotenv(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value and value[0] in {'"', "'"}:
+            try:
+                value = str(ast.literal_eval(value))
+            except (SyntaxError, ValueError):
+                value = value.strip("\"'")
+        os.environ.setdefault(key, value)
+
+
 def guess_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
@@ -179,6 +246,8 @@ def guess_rows(payload: Any) -> list[dict[str, Any]]:
         "bookings",
         "classes",
         "workouts",
+        "muscleImbalances",
+        "strengthMeasurements",
     ):
         value = payload.get(key)
         if isinstance(value, list):
@@ -199,7 +268,7 @@ def normalize_scalar(value: Any) -> str:
 
 
 def write_json(path: Path, payload: Any) -> None:
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=True))
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -212,11 +281,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             if key not in seen:
                 seen.add(key)
                 fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: normalize_scalar(row.get(key)) for key in fieldnames})
+    atomic_csv(path, fieldnames, ({key: normalize_scalar(row.get(key)) for key in fieldnames} for row in rows))
 
 
 def iso_utc_range(start_date: date, end_date: date) -> tuple[str, str]:
@@ -294,7 +359,7 @@ def flatten_workout_exercises(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             flattened.append(
                 {
                     "workout_code": workout.get("code"),
-                    "workout_completed_at": workout.get("completedAt"),
+                    "workout_completed_at": exercise.get("completedAt") or workout.get("completedAt"),
                     "exercise_code": exercise.get("exerciseCode"),
                     "exercise_name": exercise.get("name") or (exercise.get("exercise") or {}).get("label"),
                     "source_label": source.get("label"),
@@ -316,10 +381,10 @@ def flatten_machine_workout_sets(rows: list[dict[str, Any]]) -> list[dict[str, A
                 continue
             sets = (exercise.get("attributes") or {}).get("sets_of_reps_and_weight_or_duration_and_weight") or []
             for index, set_row in enumerate(sets, start=1):
-                flattened.append(
-                    {
-                        "workout_code": workout.get("code"),
-                        "workout_completed_at": workout.get("completedAt"),
+                    flattened.append(
+                        {
+                            "workout_code": workout.get("code"),
+                            "workout_completed_at": exercise.get("completedAt") or workout.get("completedAt"),
                         "exercise_code": exercise.get("exerciseCode"),
                         "exercise_name": exercise.get("name") or (exercise.get("exercise") or {}).get("label"),
                         "set_number": index,
@@ -386,6 +451,15 @@ def workouts_headers() -> dict[str, str]:
         "User-Agent": WORKOUTS_USER_AGENT,
         "X-NP-APP-Version": WORKOUTS_APP_VERSION,
         "X-NP-User-Agent": WORKOUTS_X_NP_USER_AGENT,
+    }
+
+
+def egym_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json",
+        "User-Agent": EGYM_USER_AGENT,
+        "X-NP-APP-Version": EGYM_APP_VERSION,
+        "X-NP-User-Agent": EGYM_X_NP_USER_AGENT,
     }
 
 
@@ -531,6 +605,32 @@ def export_checkins(
     return failures
 
 
+def export_egym_metrics(
+    client: FFExportClient,
+    output_dir: Path,
+    user_uuid: str,
+) -> list[str]:
+    failures: list[str] = []
+    endpoints = {
+        "egym_bioage": f"/analysis/api/v1.0/exercisers/{user_uuid}/bioage",
+        "egym_muscle_imbalances": f"/analysis/api/v1.0/exercisers/{user_uuid}/muscleimbalances",
+        "egym_body_composition": f"/measurements/api/v1.0/exercisers/{user_uuid}/body/latest",
+        "egym_flexibility": f"/measurements/api/v1.0/exercisers/{user_uuid}/flexibility/latest",
+        "egym_strength": f"/measurements/api/v1.0/exercisers/{user_uuid}/strength/latest",
+    }
+    for name, path in endpoints.items():
+        try:
+            response = client.get_egym(path)
+        except RuntimeError as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        write_json(output_dir / f"{name}.json", response.payload)
+        rows = guess_rows(response.payload)
+        if rows:
+            write_csv(output_dir / f"{name}.csv", rows)
+    return failures
+
+
 def export_workouts(
     client: FFExportClient,
     output_dir: Path,
@@ -539,13 +639,19 @@ def export_workouts(
     start_date: date,
     end_date: date,
     chunk_days: int,
-) -> None:
+) -> list[str]:
     workout_chunks = []
     merged_workouts: list[dict[str, Any]] = []
     seen_workouts: set[tuple[str, str]] = set()
-    for chunk_start, chunk_end in daterange_chunks(start_date, end_date, max(1, chunk_days)):
+    failures: list[str] = []
+    for chunk_start, chunk_end in reversed(list(daterange_chunks(start_date, end_date, max(1, chunk_days)))):
         workouts_url = build_workouts_url(base_url, user_uuid, chunk_start, chunk_end)
-        workouts_response = client.get_absolute(workouts_url, headers=workouts_headers())
+        try:
+            workouts_response = client.get_absolute(workouts_url, headers=workouts_headers())
+        except RuntimeError as exc:
+            failures.append(f"workouts {chunk_start.isoformat()} to {chunk_end.isoformat()}: {exc}")
+            workout_chunks.append({"start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(), "status": "failed"})
+            continue
         chunk_rows = guess_rows(workouts_response.payload)
         completed_after, completed_before = iso_utc_range(chunk_start, chunk_end)
         workout_chunks.append(
@@ -553,6 +659,7 @@ def export_workouts(
                 "completed_after": completed_after,
                 "completed_before": completed_before,
                 "row_count": len(chunk_rows),
+                "status": "ok",
             }
         )
         for workout in chunk_rows:
@@ -562,6 +669,14 @@ def export_workouts(
             seen_workouts.add(key)
             merged_workouts.append(workout)
 
+    # Preserve cached history when a window fails or a refresh covers fewer days.
+    cached_path = output_dir / "workouts.json"
+    if cached_path.exists():
+        for workout in guess_rows(json.loads(cached_path.read_text(encoding="utf-8"))):
+            key = (str(workout.get("code") or ""), str(workout.get("completedAt") or ""))
+            if key not in seen_workouts:
+                seen_workouts.add(key)
+                merged_workouts.append(workout)
     merged_workouts.sort(key=lambda item: item.get("completedAt") or "", reverse=True)
     workouts_payload = {"workouts": merged_workouts}
     completed_after, completed_before = iso_utc_range(start_date, end_date)
@@ -577,11 +692,15 @@ def export_workouts(
             "row_count": len(merged_workouts),
             "chunk_days": max(1, chunk_days),
             "chunks": workout_chunks,
+            "failures": failures,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+    return failures
 
 
 def main() -> int:
+    load_dotenv()
     args = parse_args()
     if not args.email or not args.password:
         print(
@@ -642,8 +761,9 @@ def main() -> int:
 
     failures = export_simple_endpoints(client, args.output_dir, endpoints)
     failures.extend(export_checkins(client, args.output_dir, user_uuid, start_date, end_date))
+    failures.extend(export_egym_metrics(client, args.output_dir, user_uuid))
     try:
-        export_workouts(
+        failures.extend(export_workouts(
             client,
             args.output_dir,
             args.base_url,
@@ -651,7 +771,7 @@ def main() -> int:
             start_date,
             end_date,
             args.workout_chunk_days,
-        )
+        ))
     except RuntimeError as exc:
         failures.append(f"workouts: {exc}")
 
@@ -661,7 +781,12 @@ def main() -> int:
             print(f"  - {failure}", file=sys.stderr)
 
     print(f"Export complete in {args.output_dir}", file=sys.stderr)
-    return 0
+    write_json(args.output_dir / "export_status.json", {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "status": "failed" if failures else "ok",
+        "failures": failures,
+    })
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
